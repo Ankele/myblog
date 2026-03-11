@@ -1,0 +1,28 @@
+server:
+  http:
+    addr: 0.0.0.0:8000
+    timeout: 1m
+  grpc:
+    addr: 0.0.0.0:9000
+    timeout: 1m
+
+data:
+  database:
+    type: postgres
+    source: "host=localhost user=postgres password=postgres dbname=myblog port=5432 sslmode=disable TimeZone=Asia/Shanghai"
+  redis:
+    addr: localhost:6379
+    password: ""
+    db: 0
+
+redis:
+  addr: localhost:6379
+  password: ""
+  db: 0
+
+app:
+  session_secret: your-session-secret-key
+  default_admin_username: admin
+  default_admin_password: admin123456
+  upload_dir: ./uploads
+  frontend_dist: ./web/dist
