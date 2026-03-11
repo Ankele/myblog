@@ -4,8 +4,10 @@ import { useRoute } from 'vue-router'
 
 import { fetchPost } from '../api/blog'
 import EmptyState from '../components/EmptyState.vue'
+import { useUserAuthStore } from '../stores/userAuth'
 
 const route = useRoute()
+const userAuthStore = useUserAuthStore()
 const loading = ref(true)
 const error = ref('')
 const post = ref(null)
@@ -63,6 +65,16 @@ onMounted(loadPost)
       <article class="content-wrap card">
         <div class="article-html" v-html="post.html_content"></div>
       </article>
+
+      <section class="interaction-panel card">
+        <p v-if="userAuthStore.isAuthenticated" class="muted">
+          已登录为 {{ userAuthStore.user?.username }}，可参与评论和点赞。
+        </p>
+        <p v-else class="muted">
+          <router-link class="inline-link" :to="{ name: 'user-login', query: { redirect: route.fullPath } }">登录</router-link>
+          后可参与评论和点赞。
+        </p>
+      </section>
     </template>
 
     <div v-else-if="loading" class="card loading-panel"></div>
@@ -110,5 +122,19 @@ onMounted(loadPost)
   width: min(820px, 100%);
   height: 320px;
   margin: 30px auto 0;
+}
+
+.interaction-panel {
+  width: min(820px, 100%);
+  margin: 16px auto 0;
+  padding: 18px 22px;
+}
+
+.interaction-panel p {
+  margin: 0;
+}
+
+.inline-link {
+  color: var(--accent);
 }
 </style>

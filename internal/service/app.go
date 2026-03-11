@@ -2,10 +2,13 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net/mail"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -28,6 +31,7 @@ const (
 var (
 	ErrUnauthorized = errors.New("username or password is incorrect")
 	ErrNotFound     = errors.New("resource not found")
+	ErrConflict     = errors.New("resource already exists")
 )
 
 type AppService struct {
@@ -74,6 +78,17 @@ type SiteSettingInput struct {
 	AboutContent   string `json:"about_content"`
 }
 
+type UserRegisterInput struct {
+	Username string `json:"username"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+type UserLoginInput struct {
+	Account  string `json:"account"`
+	Password string `json:"password"`
+}
+
 func NewAppService(cfg *conf.Config, repo *data.Repository) *AppService {
 	return &AppService{cfg: cfg, repo: repo}
 }
@@ -101,6 +116,75 @@ func (s *AppService) CurrentAdmin(ctx context.Context, id uint) (*data.AdminUser
 		return nil, err
 	}
 	return admin, nil
+}
+
+func (s *AppService) RegisterUser(ctx context.Context, input UserRegisterInput) (*data.User, error) {
+	username := strings.TrimSpace(input.Username)
+	email := strings.ToLower(strings.TrimSpace(input.Email))
+	password := input.Password
+
+	if username == "" {
+		return nil, errors.New("username is required")
+	}
+	if len(username) < 3 || len(username) > 64 {
+		return nil, errors.New("username length must be between 3 and 64")
+	}
+	if !validEmail(email) {
+		return nil, errors.New("email is invalid")
+	}
+	if err := validatePassword(password); err != nil {
+		return nil, err
+	}
+
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, err
+	}
+
+	user := &data.User{
+		ID:           randomHexID(16),
+		Username:     username,
+		Email:        email,
+		PasswordHash: string(passwordHash),
+	}
+	if err := s.repo.CreateUser(ctx, user); err != nil {
+		if isUniqueConstraintError(err) {
+			return nil, ErrConflict
+		}
+		return nil, err
+	}
+
+	return user, nil
+}
+
+func (s *AppService) AuthenticateUser(ctx context.Context, input UserLoginInput) (*data.User, error) {
+	account := strings.TrimSpace(input.Account)
+	if account == "" || input.Password == "" {
+		return nil, ErrUnauthorized
+	}
+
+	user, err := s.repo.FindUserByAccount(ctx, account)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrUnauthorized
+		}
+		return nil, err
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(input.Password)); err != nil {
+		return nil, ErrUnauthorized
+	}
+	return user, nil
+}
+
+func (s *AppService) CurrentUser(ctx context.Context, id string) (*data.User, error) {
+	user, err := s.repo.FindUserByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return user, nil
 }
 
 func (s *AppService) ListPublicPosts(ctx context.Context, filter data.ListPostsFilter) ([]data.Post, int64, error) {
@@ -426,4 +510,46 @@ func normalizeFilter(filter data.ListPostsFilter) data.ListPostsFilter {
 		filter.PageSize = 100
 	}
 	return filter
+}
+
+func validEmail(value string) bool {
+	address, err := mail.ParseAddress(value)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(address.Address), strings.TrimSpace(value))
+}
+
+func validatePassword(value string) error {
+	if len(value) < 8 {
+		return errors.New("password length must be at least 8")
+	}
+
+	hasLetter := false
+	hasDigit := false
+	for _, ch := range value {
+		if ch >= 'A' && ch <= 'Z' || ch >= 'a' && ch <= 'z' {
+			hasLetter = true
+		}
+		if ch >= '0' && ch <= '9' {
+			hasDigit = true
+		}
+	}
+	if !hasLetter || !hasDigit {
+		return errors.New("password must contain letters and numbers")
+	}
+	return nil
+}
+
+func randomHexID(size int) string {
+	buf := make([]byte, size)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(buf)
+}
+
+func isUniqueConstraintError(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "duplicate key") || strings.Contains(message, "unique constraint")
 }

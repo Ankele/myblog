@@ -25,3 +25,34 @@ func TestNormalizeFilter(t *testing.T) {
 		t.Fatalf("expected page size cap 100, got %d", filter.PageSize)
 	}
 }
+
+func TestValidatePassword(t *testing.T) {
+	cases := []struct {
+		password string
+		valid    bool
+	}{
+		{password: "abc12345", valid: true},
+		{password: "12345678", valid: false},
+		{password: "abcdefgh", valid: false},
+		{password: "a1", valid: false},
+	}
+
+	for _, tc := range cases {
+		err := validatePassword(tc.password)
+		if tc.valid && err != nil {
+			t.Fatalf("password %q should be valid, got error %v", tc.password, err)
+		}
+		if !tc.valid && err == nil {
+			t.Fatalf("password %q should be invalid", tc.password)
+		}
+	}
+}
+
+func TestValidEmail(t *testing.T) {
+	if !validEmail("demo@example.com") {
+		t.Fatalf("expected valid email")
+	}
+	if validEmail("bad-email") {
+		t.Fatalf("expected invalid email")
+	}
+}

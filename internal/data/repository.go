@@ -40,6 +40,7 @@ func NewRepository(db *gorm.DB) *Repository {
 func MigrateAndSeed(ctx context.Context, db *gorm.DB, cfg *conf.Config) error {
 	if err := db.WithContext(ctx).AutoMigrate(
 		&AdminUser{},
+		&User{},
 		&Category{},
 		&Tag{},
 		&Post{},
@@ -104,6 +105,27 @@ func (r *Repository) FindAdminByID(ctx context.Context, id uint) (*AdminUser, er
 		return nil, err
 	}
 	return &admin, nil
+}
+
+func (r *Repository) CreateUser(ctx context.Context, user *User) error {
+	return r.db.WithContext(ctx).Create(user).Error
+}
+
+func (r *Repository) FindUserByID(ctx context.Context, id string) (*User, error) {
+	var user User
+	if err := r.db.WithContext(ctx).Where("id = ?", id).First(&user).Error; err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+func (r *Repository) FindUserByAccount(ctx context.Context, account string) (*User, error) {
+	var user User
+	query := "LOWER(username) = LOWER(?) OR LOWER(email) = LOWER(?)"
+	if err := r.db.WithContext(ctx).Where(query, account, account).First(&user).Error; err != nil {
+		return nil, err
+	}
+	return &user, nil
 }
 
 func (r *Repository) ListPublicPosts(ctx context.Context, filter ListPostsFilter) ([]Post, int64, error) {

@@ -3,11 +3,17 @@ import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 
 import { useSiteStore } from '../stores/site'
+import { useUserAuthStore } from '../stores/userAuth'
 
 const route = useRoute()
 const siteStore = useSiteStore()
+const userAuthStore = useUserAuthStore()
 
 const activePath = computed(() => route.path)
+
+async function onUserLogout() {
+  await userAuthStore.logout()
+}
 </script>
 
 <template>
@@ -24,6 +30,14 @@ const activePath = computed(() => route.path)
       <nav class="site-nav">
         <router-link :class="{ active: activePath === '/' }" to="/">首页</router-link>
         <router-link :class="{ active: activePath.startsWith('/about') }" to="/about">关于</router-link>
+        <template v-if="!userAuthStore.isAuthenticated">
+          <router-link :class="{ active: activePath.startsWith('/login') }" to="/login">登录</router-link>
+          <router-link :class="{ active: activePath.startsWith('/register') }" to="/register">注册</router-link>
+        </template>
+        <template v-else>
+          <span class="chip user-chip">{{ userAuthStore.user?.username }}</span>
+          <button class="logout-btn" type="button" @click="onUserLogout">退出登录</button>
+        </template>
         <router-link class="admin-link" to="/admin">后台</router-link>
       </nav>
     </header>
@@ -105,6 +119,25 @@ const activePath = computed(() => route.path)
 
 .admin-link {
   border: 1px solid var(--line);
+}
+
+.user-chip {
+  pointer-events: none;
+}
+
+.logout-btn {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink-soft);
+  padding: 10px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 180ms ease, color 180ms ease;
+}
+
+.logout-btn:hover {
+  background: rgba(255, 255, 255, 0.45);
+  color: var(--ink);
 }
 
 .site-footer {

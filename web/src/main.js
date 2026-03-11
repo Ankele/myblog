@@ -5,6 +5,7 @@ import App from './App.vue'
 import router from './router'
 import { useAuthStore } from './stores/auth'
 import { useSiteStore } from './stores/site'
+import { useUserAuthStore } from './stores/userAuth'
 import './assets/main.css'
 
 const app = createApp(App)
@@ -15,10 +16,14 @@ app.use(router)
 
 const authStore = useAuthStore(pinia)
 const siteStore = useSiteStore(pinia)
+const userAuthStore = useUserAuthStore(pinia)
 
 router.beforeEach(async (to) => {
   if (!authStore.initialized) {
     await authStore.fetchMe().catch(() => {})
+  }
+  if (!userAuthStore.initialized) {
+    await userAuthStore.fetchMe().catch(() => {})
   }
 
   if (!siteStore.loaded && !to.meta.adminOnly) {
@@ -34,6 +39,9 @@ router.beforeEach(async (to) => {
 
   if (to.name === 'admin-login' && authStore.isAuthenticated) {
     return { name: 'admin-dashboard' }
+  }
+  if (to.meta.userGuestOnly && userAuthStore.isAuthenticated) {
+    return { name: 'home' }
   }
 
   return true
