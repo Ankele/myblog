@@ -98,3 +98,25 @@ export function uploadFile(file) {
     body: form,
   })
 }
+
+export function importMarkdownPost(file, options = {}) {
+  const form = new FormData()
+  form.append('file', file)
+  if (options.status) {
+    form.append('status', options.status)
+  }
+  if (options.category_id !== undefined && options.category_id !== null && options.category_id !== '') {
+    form.append('category_id', options.category_id)
+  }
+  if (Array.isArray(options.tag_ids) && options.tag_ids.length > 0) {
+    form.append('tag_ids', options.tag_ids.join(','))
+  }
+  if (options.cover_image) {
+    form.append('cover_image', options.cover_image)
+  }
+
+  return request('/api/admin/posts/import-markdown', {
+    method: 'POST',
+    body: form,
+  })
+}
