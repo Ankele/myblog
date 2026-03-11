@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net/mail"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 
@@ -28,6 +30,7 @@ const (
 var (
 	ErrUnauthorized = errors.New("username or password is incorrect")
 	ErrNotFound     = errors.New("resource not found")
+	ErrConflict     = errors.New("resource already exists")
 )
 
 type AppService struct {
@@ -74,6 +77,17 @@ type SiteSettingInput struct {
 	AboutContent   string `json:"about_content"`
 }
 
+type UserRegisterInput struct {
+	Username string `json:"username"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+type UserLoginInput struct {
+	Identifier string `json:"identifier"`
+	Password   string `json:"password"`
+}
+
 func NewAppService(cfg *conf.Config, repo *data.Repository) *AppService {
 	return &AppService{cfg: cfg, repo: repo}
 }
@@ -101,6 +115,75 @@ func (s *AppService) CurrentAdmin(ctx context.Context, id uint) (*data.AdminUser
 		return nil, err
 	}
 	return admin, nil
+}
+
+func (s *AppService) RegisterUser(ctx context.Context, input UserRegisterInput) (*data.BlogUser, error) {
+	username, email, password, err := normalizeUserCredentials(input.Username, input.Email, input.Password)
+	if err != nil {
+		return nil, err
+	}
+
+	exists, err := s.repo.UserExistsByUsername(ctx, username)
+	if err != nil {
+		return nil, err
+	}
+	if exists {
+		return nil, fmt.Errorf("%w: username is already taken", ErrConflict)
+	}
+
+	exists, err = s.repo.UserExistsByEmail(ctx, email)
+	if err != nil {
+		return nil, err
+	}
+	if exists {
+		return nil, fmt.Errorf("%w: email is already registered", ErrConflict)
+	}
+
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, err
+	}
+
+	user := &data.BlogUser{
+		PublicID:     uuid.NewString(),
+		Username:     username,
+		Email:        email,
+		PasswordHash: string(passwordHash),
+	}
+	if err := s.repo.CreateUser(ctx, user); err != nil {
+		return nil, err
+	}
+	return user, nil
+}
+
+func (s *AppService) AuthenticateUser(ctx context.Context, identifier, password string) (*data.BlogUser, error) {
+	user, err := s.repo.FindUserByIdentifier(ctx, identifier)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrUnauthorized
+		}
+		return nil, err
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
+		return nil, ErrUnauthorized
+	}
+	now := time.Now()
+	user.LastLoginAt = &now
+	if err := s.repo.UpdateUser(ctx, user); err != nil {
+		return nil, err
+	}
+	return user, nil
+}
+
+func (s *AppService) CurrentUser(ctx context.Context, id uint) (*data.BlogUser, error) {
+	user, err := s.repo.FindUserByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return user, nil
 }
 
 func (s *AppService) ListPublicPosts(ctx context.Context, filter data.ListPostsFilter) ([]data.Post, int64, error) {
@@ -406,6 +489,7 @@ func (s *AppService) uniqueSlug(ctx context.Context, model any, requested, fallb
 }
 
 var nonSlugPattern = regexp.MustCompile(`[^a-z0-9]+`)
+var usernamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{2,31}$`)
 
 func slugify(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
@@ -426,4 +510,25 @@ func normalizeFilter(filter data.ListPostsFilter) data.ListPostsFilter {
 		filter.PageSize = 100
 	}
 	return filter
+}
+
+func normalizeUserCredentials(username, email, password string) (string, string, string, error) {
+	normalizedUsername := strings.ToLower(strings.TrimSpace(username))
+	normalizedEmail := strings.ToLower(strings.TrimSpace(email))
+	trimmedPassword := strings.TrimSpace(password)
+
+	if !usernamePattern.MatchString(normalizedUsername) {
+		return "", "", "", errors.New("username must be 3-32 chars and use lowercase letters, numbers, dot, dash or underscore")
+	}
+	if _, err := mail.ParseAddress(normalizedEmail); err != nil {
+		return "", "", "", errors.New("a valid email is required")
+	}
+	if len(trimmedPassword) < 10 {
+		return "", "", "", errors.New("password must be at least 10 characters")
+	}
+	if len([]byte(trimmedPassword)) > 72 {
+		return "", "", "", errors.New("password must not exceed 72 bytes")
+	}
+
+	return normalizedUsername, normalizedEmail, trimmedPassword, nil
 }

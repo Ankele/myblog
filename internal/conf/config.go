@@ -31,11 +31,13 @@ type Config struct {
 		} `yaml:"redis"`
 	} `yaml:"data"`
 	App struct {
-		SessionSecret        string `yaml:"session_secret"`
-		DefaultAdminUsername string `yaml:"default_admin_username"`
-		DefaultAdminPassword string `yaml:"default_admin_password"`
-		UploadDir            string `yaml:"upload_dir"`
-		FrontendDist         string `yaml:"frontend_dist"`
+		SessionSecret        string   `yaml:"session_secret"`
+		SessionCookieSecure  bool     `yaml:"session_cookie_secure"`
+		DefaultAdminUsername string   `yaml:"default_admin_username"`
+		DefaultAdminPassword string   `yaml:"default_admin_password"`
+		UploadDir            string   `yaml:"upload_dir"`
+		FrontendDist         string   `yaml:"frontend_dist"`
+		AllowedOrigins       []string `yaml:"allowed_origins"`
 	} `yaml:"app"`
 }
 
@@ -94,5 +96,6 @@ func defaultConfig() *Config {
 	cfg.App.DefaultAdminPassword = "admin123456"
 	cfg.App.UploadDir = "./uploads"
 	cfg.App.FrontendDist = "./web/dist"
+	cfg.App.AllowedOrigins = []string{}
 	return cfg
 }

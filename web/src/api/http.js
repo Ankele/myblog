@@ -1,9 +1,11 @@
 const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
 
 export async function request(path, options = {}) {
+  const method = (options.method || 'GET').toUpperCase()
   const response = await fetch(`${API_BASE}${path}`, {
     credentials: 'include',
     headers: {
+      ...(method !== 'GET' && method !== 'HEAD' ? { 'X-Requested-With': 'XMLHttpRequest' } : {}),
       ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
       ...(options.headers || {}),
     },

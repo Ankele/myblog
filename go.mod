@@ -4,6 +4,7 @@ go 1.21
 
 require (
 	github.com/go-kratos/kratos/v2 v2.8.4
+	github.com/google/uuid v1.4.0
 	github.com/gorilla/sessions v1.2.2
 	github.com/russross/blackfriday/v2 v2.1.0
 	golang.org/x/crypto v0.31.0
@@ -17,7 +18,6 @@ require (
 	github.com/go-kratos/aegis v0.2.0 // indirect
 	github.com/go-playground/form/v4 v4.2.0 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
-	github.com/google/uuid v1.4.0 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/gorilla/securecookie v1.1.2 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect

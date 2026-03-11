@@ -40,6 +40,7 @@ func NewRepository(db *gorm.DB) *Repository {
 func MigrateAndSeed(ctx context.Context, db *gorm.DB, cfg *conf.Config) error {
 	if err := db.WithContext(ctx).AutoMigrate(
 		&AdminUser{},
+		&BlogUser{},
 		&Category{},
 		&Tag{},
 		&Post{},
@@ -104,6 +105,55 @@ func (r *Repository) FindAdminByID(ctx context.Context, id uint) (*AdminUser, er
 		return nil, err
 	}
 	return &admin, nil
+}
+
+func (r *Repository) FindUserByID(ctx context.Context, id uint) (*BlogUser, error) {
+	var user BlogUser
+	if err := r.db.WithContext(ctx).First(&user, id).Error; err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+func (r *Repository) FindUserByIdentifier(ctx context.Context, identifier string) (*BlogUser, error) {
+	normalized := strings.ToLower(strings.TrimSpace(identifier))
+	var user BlogUser
+	if err := r.db.WithContext(ctx).
+		Where("username = ? OR email = ?", normalized, normalized).
+		First(&user).Error; err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+func (r *Repository) CreateUser(ctx context.Context, user *BlogUser) error {
+	return r.db.WithContext(ctx).Create(user).Error
+}
+
+func (r *Repository) UpdateUser(ctx context.Context, user *BlogUser) error {
+	return r.db.WithContext(ctx).Save(user).Error
+}
+
+func (r *Repository) UserExistsByUsername(ctx context.Context, username string) (bool, error) {
+	var count int64
+	if err := r.db.WithContext(ctx).
+		Model(&BlogUser{}).
+		Where("username = ?", strings.ToLower(strings.TrimSpace(username))).
+		Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (r *Repository) UserExistsByEmail(ctx context.Context, email string) (bool, error) {
+	var count int64
+	if err := r.db.WithContext(ctx).
+		Model(&BlogUser{}).
+		Where("email = ?", strings.ToLower(strings.TrimSpace(email))).
+		Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func (r *Repository) ListPublicPosts(ctx context.Context, filter ListPostsFilter) ([]Post, int64, error) {
