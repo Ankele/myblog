@@ -92,6 +92,12 @@ watch(
   },
 )
 
+watch(postId, async () => {
+  errorMessage.value = ''
+  successMessage.value = ''
+  await loadPost()
+})
+
 async function onSave() {
   saving.value = true
   errorMessage.value = ''

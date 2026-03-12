@@ -24,7 +24,11 @@ async function onSubmit() {
   }
 
   try {
-    await userAuthStore.register(form)
+    await userAuthStore.register({
+      username: form.username,
+      email: form.email,
+      password: form.password,
+    })
     router.push(route.query.redirect || '/')
   } catch (error) {
     errorMessage.value = error.message
