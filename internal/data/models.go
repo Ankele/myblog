@@ -10,15 +10,13 @@ type AdminUser struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
-type BlogUser struct {
-	ID           uint       `gorm:"primaryKey" json:"-"`
-	PublicID     string     `gorm:"size:36;uniqueIndex;not null" json:"public_id"`
-	Username     string     `gorm:"size:64;uniqueIndex;not null" json:"username"`
-	Email        string     `gorm:"size:255;uniqueIndex;not null" json:"email"`
-	PasswordHash string     `gorm:"size:255;not null" json:"-"`
-	LastLoginAt  *time.Time `json:"last_login_at"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+type User struct {
+	ID           string    `gorm:"primaryKey;size:32" json:"id"`
+	Username     string    `gorm:"size:64;uniqueIndex;not null" json:"username"`
+	Email        string    `gorm:"size:255;uniqueIndex;not null" json:"email"`
+	PasswordHash string    `gorm:"size:255;not null" json:"-"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 type Category struct {

@@ -7,6 +7,8 @@ import PostDetailView from '../views/PostDetailView.vue'
 import CategoryView from '../views/CategoryView.vue'
 import TagView from '../views/TagView.vue'
 import AboutView from '../views/AboutView.vue'
+import UserLoginView from '../views/UserLoginView.vue'
+import UserRegisterView from '../views/UserRegisterView.vue'
 import AdminLoginView from '../views/AdminLoginView.vue'
 import AdminDashboardView from '../views/AdminDashboardView.vue'
 import AdminPostsView from '../views/AdminPostsView.vue'
@@ -27,6 +29,8 @@ const router = createRouter({
         { path: 'categories/:slug', name: 'category-detail', component: CategoryView, meta: { title: '分类' } },
         { path: 'tags/:slug', name: 'tag-detail', component: TagView, meta: { title: '标签' } },
         { path: 'about', name: 'about', component: AboutView, meta: { title: '关于' } },
+        { path: 'login', name: 'user-login', component: UserLoginView, meta: { title: '用户登录', userGuestOnly: true } },
+        { path: 'register', name: 'user-register', component: UserRegisterView, meta: { title: '用户注册', userGuestOnly: true } },
       ],
     },
     {

@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -84,8 +86,8 @@ type UserRegisterInput struct {
 }
 
 type UserLoginInput struct {
-	Identifier string `json:"identifier"`
-	Password   string `json:"password"`
+	Account  string `json:"account"`
+	Password string `json:"password"`
 }
 
 func NewAppService(cfg *conf.Config, repo *data.Repository) *AppService {
@@ -117,26 +119,22 @@ func (s *AppService) CurrentAdmin(ctx context.Context, id uint) (*data.AdminUser
 	return admin, nil
 }
 
-func (s *AppService) RegisterUser(ctx context.Context, input UserRegisterInput) (*data.BlogUser, error) {
-	username, email, password, err := normalizeUserCredentials(input.Username, input.Email, input.Password)
-	if err != nil {
-		return nil, err
-	}
+func (s *AppService) RegisterUser(ctx context.Context, input UserRegisterInput) (*data.User, error) {
+	username := strings.TrimSpace(input.Username)
+	email := strings.ToLower(strings.TrimSpace(input.Email))
+	password := input.Password
 
-	exists, err := s.repo.UserExistsByUsername(ctx, username)
-	if err != nil {
+	if username == "" {
+		return nil, errors.New("username is required")
+	}
+	if len(username) < 3 || len(username) > 64 {
+		return nil, errors.New("username length must be between 3 and 64")
+	}
+	if !validEmail(email) {
+		return nil, errors.New("email is invalid")
+	}
+	if err := validatePassword(password); err != nil {
 		return nil, err
-	}
-	if exists {
-		return nil, fmt.Errorf("%w: username is already taken", ErrConflict)
-	}
-
-	exists, err = s.repo.UserExistsByEmail(ctx, email)
-	if err != nil {
-		return nil, err
-	}
-	if exists {
-		return nil, fmt.Errorf("%w: email is already registered", ErrConflict)
 	}
 
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -144,38 +142,42 @@ func (s *AppService) RegisterUser(ctx context.Context, input UserRegisterInput) 
 		return nil, err
 	}
 
-	user := &data.BlogUser{
-		PublicID:     uuid.NewString(),
+	user := &data.User{
+		ID:           randomHexID(16),
 		Username:     username,
 		Email:        email,
 		PasswordHash: string(passwordHash),
 	}
 	if err := s.repo.CreateUser(ctx, user); err != nil {
+		if isUniqueConstraintError(err) {
+			return nil, ErrConflict
+		}
 		return nil, err
 	}
+
 	return user, nil
 }
 
-func (s *AppService) AuthenticateUser(ctx context.Context, identifier, password string) (*data.BlogUser, error) {
-	user, err := s.repo.FindUserByIdentifier(ctx, identifier)
+func (s *AppService) AuthenticateUser(ctx context.Context, input UserLoginInput) (*data.User, error) {
+	account := strings.TrimSpace(input.Account)
+	if account == "" || input.Password == "" {
+		return nil, ErrUnauthorized
+	}
+
+	user, err := s.repo.FindUserByAccount(ctx, account)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrUnauthorized
 		}
 		return nil, err
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(input.Password)); err != nil {
 		return nil, ErrUnauthorized
-	}
-	now := time.Now()
-	user.LastLoginAt = &now
-	if err := s.repo.UpdateUser(ctx, user); err != nil {
-		return nil, err
 	}
 	return user, nil
 }
 
-func (s *AppService) CurrentUser(ctx context.Context, id uint) (*data.BlogUser, error) {
+func (s *AppService) CurrentUser(ctx context.Context, id string) (*data.User, error) {
 	user, err := s.repo.FindUserByID(ctx, id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -512,23 +514,44 @@ func normalizeFilter(filter data.ListPostsFilter) data.ListPostsFilter {
 	return filter
 }
 
-func normalizeUserCredentials(username, email, password string) (string, string, string, error) {
-	normalizedUsername := strings.ToLower(strings.TrimSpace(username))
-	normalizedEmail := strings.ToLower(strings.TrimSpace(email))
-	trimmedPassword := strings.TrimSpace(password)
+func validEmail(value string) bool {
+	address, err := mail.ParseAddress(value)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(address.Address), strings.TrimSpace(value))
+}
 
-	if !usernamePattern.MatchString(normalizedUsername) {
-		return "", "", "", errors.New("username must be 3-32 chars and use lowercase letters, numbers, dot, dash or underscore")
-	}
-	if _, err := mail.ParseAddress(normalizedEmail); err != nil {
-		return "", "", "", errors.New("a valid email is required")
-	}
-	if len(trimmedPassword) < 10 {
-		return "", "", "", errors.New("password must be at least 10 characters")
-	}
-	if len([]byte(trimmedPassword)) > 72 {
-		return "", "", "", errors.New("password must not exceed 72 bytes")
+func validatePassword(value string) error {
+	if len(value) < 8 {
+		return errors.New("password length must be at least 8")
 	}
 
-	return normalizedUsername, normalizedEmail, trimmedPassword, nil
+	hasLetter := false
+	hasDigit := false
+	for _, ch := range value {
+		if ch >= 'A' && ch <= 'Z' || ch >= 'a' && ch <= 'z' {
+			hasLetter = true
+		}
+		if ch >= '0' && ch <= '9' {
+			hasDigit = true
+		}
+	}
+	if !hasLetter || !hasDigit {
+		return errors.New("password must contain letters and numbers")
+	}
+	return nil
+}
+
+func randomHexID(size int) string {
+	buf := make([]byte, size)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(buf)
+}
+
+func isUniqueConstraintError(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "duplicate key") || strings.Contains(message, "unique constraint")
 }

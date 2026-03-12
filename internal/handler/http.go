@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -23,12 +23,10 @@ import (
 )
 
 const (
-	adminSessionName   = "myblog_admin"
-	userSessionName    = "myblog_user"
-	csrfHeaderName     = "X-Requested-With"
-	csrfHeaderValue    = "XMLHttpRequest"
-	maxJSONBodyBytes   = 1 << 20
-	maxUploadBodyBytes = 10 << 20
+	adminSessionName  = "myblog_admin"
+	userSessionName   = "myblog_user"
+	jsonBodyLimit     = int64(1 << 20) // 1 MiB
+	maxUploadBodySize = int64(10 << 20)
 )
 
 type HTTPHandler struct {
@@ -205,6 +203,104 @@ func (h *HTTPHandler) handlePublicSite(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"data": site})
 }
 
+func (h *HTTPHandler) handleUserRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+
+	var payload service.UserRegisterInput
+	if err := decodeJSON(w, r, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	user, err := h.service.RegisterUser(r.Context(), payload)
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrConflict):
+			writeError(w, http.StatusConflict, errors.New("username or email already exists"))
+		default:
+			writeError(w, http.StatusBadRequest, err)
+		}
+		return
+	}
+
+	session, _ := h.sessions.Get(r, userSessionName)
+	session.Values["user_id"] = user.ID
+	if err := session.Save(r, w); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{"data": mapUser(user)})
+}
+
+func (h *HTTPHandler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+
+	var payload service.UserLoginInput
+	if err := decodeJSON(w, r, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	user, err := h.service.AuthenticateUser(r.Context(), payload)
+	if err != nil {
+		status := http.StatusUnauthorized
+		if !errors.Is(err, service.ErrUnauthorized) {
+			status = http.StatusInternalServerError
+		}
+		writeError(w, status, err)
+		return
+	}
+
+	session, _ := h.sessions.Get(r, userSessionName)
+	session.Values["user_id"] = user.ID
+	if err := session.Save(r, w); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"data": mapUser(user)})
+}
+
+func (h *HTTPHandler) handleUserLogout(w http.ResponseWriter, r *http.Request, _ string) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+
+	session, _ := h.sessions.Get(r, userSessionName)
+	session.Options.MaxAge = -1
+	if err := session.Save(r, w); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": "ok"})
+}
+
+func (h *HTTPHandler) handleUserMe(w http.ResponseWriter, r *http.Request, userID string) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+
+	user, err := h.service.CurrentUser(r.Context(), userID)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, service.ErrNotFound) {
+			status = http.StatusUnauthorized
+		}
+		writeError(w, status, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": mapUser(user)})
+}
+
 func (h *HTTPHandler) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
@@ -219,7 +315,7 @@ func (h *HTTPHandler) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
-	if err := decodeJSON(w, r, &payload, maxJSONBodyBytes); err != nil {
+	if err := decodeJSON(w, r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -239,7 +335,6 @@ func (h *HTTPHandler) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	session, _ := h.sessions.Get(r, adminSessionName)
-	session.Values = map[interface{}]interface{}{}
 	session.Values["admin_id"] = int(admin.ID)
 	if err := session.Save(r, w); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -310,7 +405,7 @@ func (h *HTTPHandler) handleAdminPosts(w http.ResponseWriter, r *http.Request, _
 			return
 		}
 		var payload service.PostInput
-		if err := decodeJSON(w, r, &payload, maxJSONBodyBytes); err != nil {
+		if err := decodeJSON(w, r, &payload); err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
@@ -337,7 +432,7 @@ func (h *HTTPHandler) handleAdminPreview(w http.ResponseWriter, r *http.Request,
 	var payload struct {
 		MarkdownContent string `json:"markdown_content"`
 	}
-	if err := decodeJSON(w, r, &payload, maxJSONBodyBytes); err != nil {
+	if err := decodeJSON(w, r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -373,7 +468,7 @@ func (h *HTTPHandler) handleAdminPostItem(w http.ResponseWriter, r *http.Request
 			return
 		}
 		var payload service.PostInput
-		if err := decodeJSON(w, r, &payload, maxJSONBodyBytes); err != nil {
+		if err := decodeJSON(w, r, &payload); err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
@@ -417,7 +512,7 @@ func (h *HTTPHandler) handleAdminCategories(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		var payload service.CategoryInput
-		if err := decodeJSON(w, r, &payload, maxJSONBodyBytes); err != nil {
+		if err := decodeJSON(w, r, &payload); err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
@@ -445,7 +540,7 @@ func (h *HTTPHandler) handleAdminCategoryItem(w http.ResponseWriter, r *http.Req
 			return
 		}
 		var payload service.CategoryInput
-		if err := decodeJSON(w, r, &payload, maxJSONBodyBytes); err != nil {
+		if err := decodeJSON(w, r, &payload); err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
@@ -489,7 +584,7 @@ func (h *HTTPHandler) handleAdminTags(w http.ResponseWriter, r *http.Request, _ 
 			return
 		}
 		var payload service.TagInput
-		if err := decodeJSON(w, r, &payload, maxJSONBodyBytes); err != nil {
+		if err := decodeJSON(w, r, &payload); err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
@@ -517,7 +612,7 @@ func (h *HTTPHandler) handleAdminTagItem(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		var payload service.TagInput
-		if err := decodeJSON(w, r, &payload, maxJSONBodyBytes); err != nil {
+		if err := decodeJSON(w, r, &payload); err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
@@ -561,7 +656,7 @@ func (h *HTTPHandler) handleAdminSite(w http.ResponseWriter, r *http.Request, _ 
 			return
 		}
 		var payload service.SiteSettingInput
-		if err := decodeJSON(w, r, &payload, maxJSONBodyBytes); err != nil {
+		if err := decodeJSON(w, r, &payload); err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
@@ -586,10 +681,13 @@ func (h *HTTPHandler) handleAdminUpload(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBodyBytes)
-	if err := r.ParseMultipartForm(8 << 20); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBodySize+(1<<20))
+	if err := r.ParseMultipartForm(maxUploadBodySize); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
 	}
 
 	file, header, err := r.FormFile("file")
@@ -849,7 +947,7 @@ func (h *HTTPHandler) requireAdmin(next func(http.ResponseWriter, *http.Request,
 	}
 }
 
-func (h *HTTPHandler) requireUser(next func(http.ResponseWriter, *http.Request, uint)) http.HandlerFunc {
+func (h *HTTPHandler) requireUser(next func(http.ResponseWriter, *http.Request, string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		session, _ := h.sessions.Get(r, userSessionName)
 		rawID, ok := session.Values["user_id"]
@@ -858,8 +956,8 @@ func (h *HTTPHandler) requireUser(next func(http.ResponseWriter, *http.Request, 
 			return
 		}
 
-		userID, ok := normalizeSessionID(rawID)
-		if !ok {
+		userID, ok := normalizeSessionString(rawID)
+		if !ok || userID == "" {
 			writeError(w, http.StatusUnauthorized, errors.New("invalid session"))
 			return
 		}
@@ -868,7 +966,8 @@ func (h *HTTPHandler) requireUser(next func(http.ResponseWriter, *http.Request, 
 	}
 }
 
-func decodeJSON(w http.ResponseWriter, r *http.Request, dest any, maxBytes int64) error {
+func decodeJSON(w http.ResponseWriter, r *http.Request, dest any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, jsonBodyLimit)
 	defer r.Body.Close()
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	decoder := json.NewDecoder(r.Body)
@@ -877,9 +976,9 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dest any, maxBytes int64
 		return err
 	}
 
-	var extra any
+	var extra struct{}
 	if err := decoder.Decode(&extra); err != io.EOF {
-		return errors.New("request body must contain only a single JSON object")
+		return errors.New("request body must contain a single JSON object")
 	}
 	return nil
 }
@@ -931,6 +1030,17 @@ func normalizeSessionID(raw any) (uint, bool) {
 	}
 }
 
+func normalizeSessionString(raw any) (string, bool) {
+	switch value := raw.(type) {
+	case string:
+		return value, true
+	case []byte:
+		return string(value), true
+	default:
+		return "", false
+	}
+}
+
 func mapPosts(posts []data.Post, includeMarkdown bool) []map[string]any {
 	items := make([]map[string]any, 0, len(posts))
 	for i := range posts {
@@ -962,14 +1072,13 @@ func mapPost(post *data.Post, includeMarkdown bool) map[string]any {
 	return payload
 }
 
-func mapUser(user *data.BlogUser) map[string]any {
+func mapUser(user *data.User) map[string]any {
 	return map[string]any{
-		"public_id":     user.PublicID,
-		"username":      user.Username,
-		"email":         user.Email,
-		"last_login_at": user.LastLoginAt,
-		"created_at":    user.CreatedAt,
-		"updated_at":    user.UpdatedAt,
+		"id":         user.ID,
+		"username":   user.Username,
+		"email":      user.Email,
+		"created_at": user.CreatedAt,
+		"updated_at": user.UpdatedAt,
 	}
 }
 
@@ -986,7 +1095,11 @@ func baseURL(r *http.Request) string {
 
 func (h *HTTPHandler) cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if value := h.origin(r); value != "" {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+
+		if value := origin(r); value != "" {
 			w.Header().Set("Access-Control-Allow-Origin", value)
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 		}
@@ -1000,16 +1113,23 @@ func (h *HTTPHandler) cors(next http.Handler) http.Handler {
 	})
 }
 
-func (h *HTTPHandler) origin(r *http.Request) string {
-	value := r.Header.Get("Origin")
+func origin(r *http.Request) string {
+	value := strings.TrimSpace(r.Header.Get("Origin"))
 	if value == "" {
 		return ""
 	}
-	for _, allowed := range h.cfg.App.AllowedOrigins {
-		if strings.EqualFold(strings.TrimSpace(allowed), value) {
-			return value
-		}
+
+	u, err := url.Parse(value)
+	if err != nil {
+		return ""
 	}
+	if strings.EqualFold(u.Host, r.Host) {
+		return value
+	}
+	if u.Host == "localhost:5173" || u.Host == "127.0.0.1:5173" {
+		return value
+	}
+
 	return ""
 }
 

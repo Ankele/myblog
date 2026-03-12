@@ -26,46 +26,33 @@ func TestNormalizeFilter(t *testing.T) {
 	}
 }
 
-func TestNormalizeUserCredentials(t *testing.T) {
-	username, email, password, err := normalizeUserCredentials("Alice_01", "Alice@example.com", "supersecret1")
-	if err != nil {
-		t.Fatalf("expected valid credentials, got %v", err)
+func TestValidatePassword(t *testing.T) {
+	cases := []struct {
+		password string
+		valid    bool
+	}{
+		{password: "abc12345", valid: true},
+		{password: "12345678", valid: false},
+		{password: "abcdefgh", valid: false},
+		{password: "a1", valid: false},
 	}
-	if username != "alice_01" {
-		t.Fatalf("unexpected username: %s", username)
-	}
-	if email != "alice@example.com" {
-		t.Fatalf("unexpected email: %s", email)
-	}
-	if password != "supersecret1" {
-		t.Fatalf("unexpected password normalization: %s", password)
+
+	for _, tc := range cases {
+		err := validatePassword(tc.password)
+		if tc.valid && err != nil {
+			t.Fatalf("password %q should be valid, got error %v", tc.password, err)
+		}
+		if !tc.valid && err == nil {
+			t.Fatalf("password %q should be invalid", tc.password)
+		}
 	}
 }
 
-func TestNormalizeUserCredentialsRejectsWeakPassword(t *testing.T) {
-	if _, _, _, err := normalizeUserCredentials("alice", "alice@example.com", "short"); err == nil {
-		t.Fatal("expected short password to be rejected")
+func TestValidEmail(t *testing.T) {
+	if !validEmail("demo@example.com") {
+		t.Fatalf("expected valid email")
 	}
-}
-
-func TestParseMarkdownFrontMatter(t *testing.T) {
-	meta, body := parseMarkdownFrontMatter("---\ntitle: Imported Post\nslug: imported-post\nsummary: custom summary\n---\n# Imported Post\n\nHello world.")
-	if meta.Title != "Imported Post" || meta.Slug != "imported-post" {
-		t.Fatalf("unexpected metadata: %+v", meta)
-	}
-	if body != "# Imported Post\n\nHello world." {
-		t.Fatalf("unexpected body: %q", body)
-	}
-}
-
-func TestExtractMarkdownTitleAndSummary(t *testing.T) {
-	title := extractMarkdownTitle("# Hello Title\n\nThis is the first paragraph.", "demo-file.md")
-	if title != "Hello Title" {
-		t.Fatalf("unexpected title: %s", title)
-	}
-
-	summary := extractMarkdownSummary("# Title\n\nThis is the first paragraph with [link](https://example.com) and `code`.")
-	if summary == "" || summary == "# Title" {
-		t.Fatalf("unexpected summary: %q", summary)
+	if validEmail("bad-email") {
+		t.Fatalf("expected invalid email")
 	}
 }
