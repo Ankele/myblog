@@ -85,6 +85,7 @@ async function renderPreview() {
 watch(
   () => form.markdown_content,
   () => {
+    // 输入时做轻量防抖，避免每次按键都触发预览接口。
     window.clearTimeout(previewTimer)
     previewTimer = window.setTimeout(() => {
       renderPreview().catch(() => {})
@@ -93,6 +94,7 @@ watch(
 )
 
 watch(postId, async () => {
+  // 同一组件在“新建 -> 编辑详情”之间复用，需要手动响应路由参数变化。
   errorMessage.value = ''
   successMessage.value = ''
   await loadPost()

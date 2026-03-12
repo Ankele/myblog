@@ -123,6 +123,7 @@ func (s *AppService) RegisterUser(ctx context.Context, input UserRegisterInput) 
 	email := strings.ToLower(strings.TrimSpace(input.Email))
 	password := input.Password
 
+	// 用户名和密码规则尽量保持简单明确，避免首版引入复杂账号体系。
 	if username == "" {
 		return nil, errors.New("username is required")
 	}
@@ -405,6 +406,7 @@ func (s *AppService) SaveUpload(file multipart.File, header *multipart.FileHeade
 		ext = ".bin"
 	}
 
+	// 上传文件统一改名，避免原文件名冲突，也避免直接暴露用户本地命名。
 	name := fmt.Sprintf("%d-%s%s", time.Now().UnixNano(), slugify(strings.TrimSuffix(header.Filename, filepath.Ext(header.Filename))), ext)
 	if strings.Contains(name, "--") || strings.HasSuffix(name, "-"+ext) {
 		name = fmt.Sprintf("%d-asset%s", time.Now().UnixNano(), ext)
@@ -446,6 +448,7 @@ func (s *AppService) buildPost(ctx context.Context, id uint, current *data.Post,
 	slug := s.uniqueSlug(ctx, &data.Post{}, strings.TrimSpace(input.Slug), title, id)
 	now := time.Now()
 
+	// 文章 HTML 固定由后端生成，前端只负责展示，避免渲染逻辑分散到浏览器侧。
 	post := &data.Post{
 		Title:           title,
 		Slug:            slug,
@@ -462,6 +465,7 @@ func (s *AppService) buildPost(ctx context.Context, id uint, current *data.Post,
 	}
 
 	if status == PostStatusPublished {
+		// 已发布文章重复编辑时保留原发布时间，新发布文章则首次写入发布时间。
 		if current != nil && current.PublishedAt != nil {
 			post.PublishedAt = current.PublishedAt
 		} else {
@@ -481,6 +485,7 @@ func (s *AppService) uniqueSlug(ctx context.Context, model any, requested, fallb
 		base = "item"
 	}
 
+	// slug 冲突时顺延数字，保证 URL 稳定且可预期。
 	slug := base
 	for i := 1; i < 1000; i++ {
 		exists, err := s.repo.SlugExists(ctx, model, slug, excludeID)

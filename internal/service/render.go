@@ -33,6 +33,7 @@ var allowedElements = map[string]map[string]bool{
 }
 
 func RenderMarkdown(input string) string {
+	// 原始 Markdown 先转 HTML，再经过白名单清洗，避免脚本和危险属性混入。
 	renderer := blackfriday.NewHTMLRenderer(blackfriday.HTMLRendererParameters{
 		Flags: blackfriday.UseXHTML |
 			blackfriday.SkipHTML |
@@ -84,6 +85,7 @@ func renderNode(buf *bytes.Buffer, node *xhtml.Node) {
 	case xhtml.ElementNode:
 		attrs, ok := allowedElements[node.Data]
 		if !ok {
+			// 不允许的标签直接剥掉标签壳，只保留安全的文本子节点。
 			for child := node.FirstChild; child != nil; child = child.NextSibling {
 				renderNode(buf, child)
 			}

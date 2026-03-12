@@ -85,17 +85,20 @@ func NewHTTPHandler(cfg *conf.Config, service *service.AppService) *HTTPHandler 
 func (h *HTTPHandler) Routes() http.Handler {
 	mux := http.NewServeMux()
 
+	// 公开站点接口。
 	mux.HandleFunc("/api/posts", h.handlePublicPosts)
 	mux.HandleFunc("/api/posts/", h.handlePublicPostDetail)
 	mux.HandleFunc("/api/categories", h.handlePublicCategories)
 	mux.HandleFunc("/api/tags", h.handlePublicTags)
 	mux.HandleFunc("/api/site", h.handlePublicSite)
 
+	// 普通用户认证接口。
 	mux.HandleFunc("/api/auth/register", h.handleUserRegister)
 	mux.HandleFunc("/api/auth/login", h.handleUserLogin)
 	mux.HandleFunc("/api/auth/logout", h.requireUser(h.handleUserLogout))
 	mux.HandleFunc("/api/auth/me", h.requireUser(h.handleUserMe))
 
+	// 管理后台接口。
 	mux.HandleFunc("/api/admin/login", h.handleAdminLogin)
 	mux.HandleFunc("/api/admin/logout", h.requireAdmin(h.handleAdminLogout))
 	mux.HandleFunc("/api/admin/me", h.requireAdmin(h.handleAdminMe))
@@ -485,6 +488,7 @@ func (h *HTTPHandler) handleAdminImportMarkdown(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	// 导入时允许从表单带入分类、标签和封面等元信息。
 	categoryID, err := service.ParseOptionalUint(r.FormValue("category_id"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -868,6 +872,7 @@ func (h *HTTPHandler) frontendHandler() http.Handler {
 			return
 		}
 
+		// 前端使用 history 路由，未知路径统一回退到 index.html。
 		indexPath := filepath.Join(dist, "index.html")
 		if _, err := os.Stat(indexPath); err == nil {
 			http.ServeFile(w, r, indexPath)
@@ -918,6 +923,7 @@ func (h *HTTPHandler) requireUser(next func(http.ResponseWriter, *http.Request, 
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, dest any) error {
+	// 限制 JSON 请求体大小，避免异常大包拖垮服务。
 	r.Body = http.MaxBytesReader(w, r.Body, jsonBodyLimit)
 	defer r.Body.Close()
 
@@ -927,6 +933,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dest any) error {
 		return err
 	}
 
+	// 只允许一个 JSON 对象，拒绝拼接的多段 payload。
 	var extra struct{}
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return errors.New("request body must contain a single JSON object")
@@ -1045,6 +1052,7 @@ func baseURL(r *http.Request) string {
 
 func (h *HTTPHandler) cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 仅放行同域、开发环境 Vite 地址，以及配置里显式允许的来源。
 		if value := h.origin(r); value != "" {
 			w.Header().Set("Access-Control-Allow-Origin", value)
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
@@ -1091,6 +1099,7 @@ func newAuthRateLimiter() *authRateLimiter {
 }
 
 func (l *authRateLimiter) Allow(key string, limit int, window time.Duration) bool {
+	// 这里用进程内滑动窗口做基础限流，优先挡掉暴力注册/登录请求。
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -1126,6 +1135,7 @@ func clientIP(r *http.Request) string {
 func enforceStateChangingRequest(r *http.Request) error {
 	switch r.Method {
 	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		// 当前项目用固定请求头区分浏览器同站 AJAX 请求，避免表单直打接口。
 		if r.Header.Get(csrfHeaderName) != csrfHeaderValue {
 			return errors.New("missing required csrf request header")
 		}
