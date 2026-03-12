@@ -55,6 +55,7 @@ func (s *AppService) ImportMarkdownPost(ctx context.Context, file multipart.File
 		return nil, errors.New("markdown file is empty")
 	}
 
+	// 优先读取 front matter；如果没有则从正文标题和内容自动推断元信息。
 	meta, body := parseMarkdownFrontMatter(markdown)
 	title := strings.TrimSpace(meta.Title)
 	if title == "" {
@@ -160,6 +161,7 @@ func parseMarkdownFrontMatter(input string) (markdownFrontMatter, string) {
 	}
 
 	_ = yaml.Unmarshal([]byte(strings.Join(lines, "\n")), &meta)
+	// front matter 之后的正文作为真正 Markdown 内容入库。
 	body := strings.TrimSpace(strings.Join(bodyLines, "\n"))
 	if body == "" {
 		body = input
@@ -189,6 +191,7 @@ func extractMarkdownTitle(markdown string, filename string) string {
 var markdownDecorationPattern = regexp.MustCompile("(```[\\s\\S]*?```|`[^`]+`|\\!\\[[^\\]]*\\]\\([^\\)]*\\)|\\[[^\\]]+\\]\\([^\\)]*\\)|[#>*_~-])")
 
 func extractMarkdownSummary(markdown string) string {
+	// 摘要只取第一段可读文本，过滤标题、代码块和 Markdown 装饰字符。
 	blocks := strings.Split(markdown, "\n\n")
 	for _, block := range blocks {
 		text := strings.TrimSpace(block)
