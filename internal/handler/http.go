@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -25,8 +26,10 @@ import (
 const (
 	adminSessionName  = "myblog_admin"
 	userSessionName   = "myblog_user"
-	jsonBodyLimit     = int64(1 << 20) // 1 MiB
+	jsonBodyLimit     = int64(1 << 20)
 	maxUploadBodySize = int64(10 << 20)
+	csrfHeaderName    = "X-Requested-With"
+	csrfHeaderValue   = "XMLHttpRequest"
 )
 
 type HTTPHandler struct {
@@ -70,6 +73,7 @@ func NewHTTPHandler(cfg *conf.Config, service *service.AppService) *HTTPHandler 
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	}
+
 	return &HTTPHandler{
 		cfg:         cfg,
 		service:     service,
@@ -86,6 +90,7 @@ func (h *HTTPHandler) Routes() http.Handler {
 	mux.HandleFunc("/api/categories", h.handlePublicCategories)
 	mux.HandleFunc("/api/tags", h.handlePublicTags)
 	mux.HandleFunc("/api/site", h.handlePublicSite)
+
 	mux.HandleFunc("/api/auth/register", h.handleUserRegister)
 	mux.HandleFunc("/api/auth/login", h.handleUserLogin)
 	mux.HandleFunc("/api/auth/logout", h.requireUser(h.handleUserLogout))
@@ -118,9 +123,11 @@ func (h *HTTPHandler) handlePublicPosts(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	page := parseInt(r.URL.Query().Get("page"), 1)
+	pageSize := parseInt(r.URL.Query().Get("page_size"), 10)
 	posts, total, err := h.service.ListPublicPosts(r.Context(), data.ListPostsFilter{
-		Page:         parseInt(r.URL.Query().Get("page"), 1),
-		PageSize:     parseInt(r.URL.Query().Get("page_size"), 10),
+		Page:         page,
+		PageSize:     pageSize,
 		CategorySlug: strings.TrimSpace(r.URL.Query().Get("category")),
 		TagSlug:      strings.TrimSpace(r.URL.Query().Get("tag")),
 	})
@@ -132,8 +139,8 @@ func (h *HTTPHandler) handlePublicPosts(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": mapPosts(posts, false),
 		"meta": map[string]any{
-			"page":      parseInt(r.URL.Query().Get("page"), 1),
-			"page_size": parseInt(r.URL.Query().Get("page_size"), 10),
+			"page":      page,
+			"page_size": pageSize,
 			"total":     total,
 		},
 	})
@@ -145,7 +152,7 @@ func (h *HTTPHandler) handlePublicPostDetail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	slug := strings.TrimPrefix(r.URL.Path, "/api/posts/")
+	slug := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/posts/"), "/")
 	if slug == "" {
 		writeError(w, http.StatusNotFound, service.ErrNotFound)
 		return
@@ -169,6 +176,7 @@ func (h *HTTPHandler) handlePublicCategories(w http.ResponseWriter, r *http.Requ
 		methodNotAllowed(w)
 		return
 	}
+
 	items, err := h.service.ListCategories(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -182,6 +190,7 @@ func (h *HTTPHandler) handlePublicTags(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
+
 	items, err := h.service.ListTags(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -195,6 +204,7 @@ func (h *HTTPHandler) handlePublicSite(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
+
 	site, err := h.service.GetSiteSetting(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -208,6 +218,14 @@ func (h *HTTPHandler) handleUserRegister(w http.ResponseWriter, r *http.Request)
 		methodNotAllowed(w)
 		return
 	}
+	if err := enforceStateChangingRequest(r); err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if !h.authLimiter.Allow(h.rateLimitKey(r, "user-register"), 5, 15*time.Minute) {
+		writeError(w, http.StatusTooManyRequests, errors.New("too many registration attempts, please try again later"))
+		return
+	}
 
 	var payload service.UserRegisterInput
 	if err := decodeJSON(w, r, &payload); err != nil {
@@ -217,16 +235,16 @@ func (h *HTTPHandler) handleUserRegister(w http.ResponseWriter, r *http.Request)
 
 	user, err := h.service.RegisterUser(r.Context(), payload)
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrConflict):
-			writeError(w, http.StatusConflict, errors.New("username or email already exists"))
-		default:
-			writeError(w, http.StatusBadRequest, err)
+		status := http.StatusBadRequest
+		if errors.Is(err, service.ErrConflict) {
+			status = http.StatusConflict
 		}
+		writeError(w, status, err)
 		return
 	}
 
 	session, _ := h.sessions.Get(r, userSessionName)
+	session.Values = map[interface{}]interface{}{}
 	session.Values["user_id"] = user.ID
 	if err := session.Save(r, w); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -241,10 +259,18 @@ func (h *HTTPHandler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
+	if err := enforceStateChangingRequest(r); err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
 
 	var payload service.UserLoginInput
 	if err := decodeJSON(w, r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if !h.authLimiter.Allow(h.rateLimitKey(r, "user-login:"+strings.ToLower(strings.TrimSpace(payload.Account))), 10, 15*time.Minute) {
+		writeError(w, http.StatusTooManyRequests, errors.New("too many login attempts, please try again later"))
 		return
 	}
 
@@ -259,6 +285,7 @@ func (h *HTTPHandler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	session, _ := h.sessions.Get(r, userSessionName)
+	session.Values = map[interface{}]interface{}{}
 	session.Values["user_id"] = user.ID
 	if err := session.Save(r, w); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -273,6 +300,10 @@ func (h *HTTPHandler) handleUserLogout(w http.ResponseWriter, r *http.Request, _
 		methodNotAllowed(w)
 		return
 	}
+	if err := enforceStateChangingRequest(r); err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
 
 	session, _ := h.sessions.Get(r, userSessionName)
 	session.Options.MaxAge = -1
@@ -280,6 +311,7 @@ func (h *HTTPHandler) handleUserLogout(w http.ResponseWriter, r *http.Request, _
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+
 	writeJSON(w, http.StatusOK, map[string]any{"data": "ok"})
 }
 
@@ -298,6 +330,7 @@ func (h *HTTPHandler) handleUserMe(w http.ResponseWriter, r *http.Request, userI
 		writeError(w, status, err)
 		return
 	}
+
 	writeJSON(w, http.StatusOK, map[string]any{"data": mapUser(user)})
 }
 
@@ -335,6 +368,7 @@ func (h *HTTPHandler) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	session, _ := h.sessions.Get(r, adminSessionName)
+	session.Values = map[interface{}]interface{}{}
 	session.Values["admin_id"] = int(admin.ID)
 	if err := session.Save(r, w); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -360,6 +394,7 @@ func (h *HTTPHandler) handleAdminLogout(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+
 	writeJSON(w, http.StatusOK, map[string]any{"data": "ok"})
 }
 
@@ -380,9 +415,11 @@ func (h *HTTPHandler) handleAdminMe(w http.ResponseWriter, r *http.Request, admi
 func (h *HTTPHandler) handleAdminPosts(w http.ResponseWriter, r *http.Request, _ uint) {
 	switch r.Method {
 	case http.MethodGet:
+		page := parseInt(r.URL.Query().Get("page"), 1)
+		pageSize := parseInt(r.URL.Query().Get("page_size"), 20)
 		posts, total, err := h.service.ListAdminPosts(r.Context(), data.ListPostsFilter{
-			Page:         parseInt(r.URL.Query().Get("page"), 1),
-			PageSize:     parseInt(r.URL.Query().Get("page_size"), 20),
+			Page:         page,
+			PageSize:     pageSize,
 			Status:       strings.TrimSpace(r.URL.Query().Get("status")),
 			CategorySlug: strings.TrimSpace(r.URL.Query().Get("category")),
 			TagSlug:      strings.TrimSpace(r.URL.Query().Get("tag")),
@@ -394,8 +431,8 @@ func (h *HTTPHandler) handleAdminPosts(w http.ResponseWriter, r *http.Request, _
 		writeJSON(w, http.StatusOK, map[string]any{
 			"data": mapPosts(posts, true),
 			"meta": map[string]any{
-				"page":      parseInt(r.URL.Query().Get("page"), 1),
-				"page_size": parseInt(r.URL.Query().Get("page_size"), 20),
+				"page":      page,
+				"page_size": pageSize,
 				"total":     total,
 			},
 		})
@@ -404,304 +441,23 @@ func (h *HTTPHandler) handleAdminPosts(w http.ResponseWriter, r *http.Request, _
 			writeError(w, http.StatusForbidden, err)
 			return
 		}
+
 		var payload service.PostInput
 		if err := decodeJSON(w, r, &payload); err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
+
 		post, err := h.service.CreatePost(r.Context(), payload)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
+
 		writeJSON(w, http.StatusCreated, map[string]any{"data": mapPost(post, true)})
 	default:
 		methodNotAllowed(w)
 	}
-}
-
-func (h *HTTPHandler) handleAdminPreview(w http.ResponseWriter, r *http.Request, _ uint) {
-	if r.Method != http.MethodPost {
-		methodNotAllowed(w)
-		return
-	}
-	if err := enforceStateChangingRequest(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
-		return
-	}
-	var payload struct {
-		MarkdownContent string `json:"markdown_content"`
-	}
-	if err := decodeJSON(w, r, &payload); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"data": map[string]string{
-			"html_content": h.service.RenderPreview(payload.MarkdownContent),
-		},
-	})
-}
-
-func (h *HTTPHandler) handleAdminPostItem(w http.ResponseWriter, r *http.Request, _ uint) {
-	id, err := parseUintPath(r.URL.Path, "/api/admin/posts/")
-	if err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
-	}
-
-	switch r.Method {
-	case http.MethodGet:
-		post, err := h.service.GetAdminPost(r.Context(), id)
-		if err != nil {
-			status := http.StatusInternalServerError
-			if errors.Is(err, service.ErrNotFound) {
-				status = http.StatusNotFound
-			}
-			writeError(w, status, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"data": mapPost(post, true)})
-	case http.MethodPut:
-		if err := enforceStateChangingRequest(r); err != nil {
-			writeError(w, http.StatusForbidden, err)
-			return
-		}
-		var payload service.PostInput
-		if err := decodeJSON(w, r, &payload); err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		post, err := h.service.UpdatePost(r.Context(), id, payload)
-		if err != nil {
-			status := http.StatusBadRequest
-			if errors.Is(err, service.ErrNotFound) {
-				status = http.StatusNotFound
-			}
-			writeError(w, status, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"data": mapPost(post, true)})
-	case http.MethodDelete:
-		if err := enforceStateChangingRequest(r); err != nil {
-			writeError(w, http.StatusForbidden, err)
-			return
-		}
-		if err := h.service.DeletePost(r.Context(), id); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"data": "ok"})
-	default:
-		methodNotAllowed(w)
-	}
-}
-
-func (h *HTTPHandler) handleAdminCategories(w http.ResponseWriter, r *http.Request, _ uint) {
-	switch r.Method {
-	case http.MethodGet:
-		items, err := h.service.ListCategories(r.Context())
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"data": items})
-	case http.MethodPost:
-		if err := enforceStateChangingRequest(r); err != nil {
-			writeError(w, http.StatusForbidden, err)
-			return
-		}
-		var payload service.CategoryInput
-		if err := decodeJSON(w, r, &payload); err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		item, err := h.service.CreateCategory(r.Context(), payload)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		writeJSON(w, http.StatusCreated, map[string]any{"data": item})
-	default:
-		methodNotAllowed(w)
-	}
-}
-
-func (h *HTTPHandler) handleAdminCategoryItem(w http.ResponseWriter, r *http.Request, _ uint) {
-	id, err := parseUintPath(r.URL.Path, "/api/admin/categories/")
-	if err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
-	}
-	switch r.Method {
-	case http.MethodPut:
-		if err := enforceStateChangingRequest(r); err != nil {
-			writeError(w, http.StatusForbidden, err)
-			return
-		}
-		var payload service.CategoryInput
-		if err := decodeJSON(w, r, &payload); err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		item, err := h.service.UpdateCategory(r.Context(), id, payload)
-		if err != nil {
-			status := http.StatusBadRequest
-			if errors.Is(err, service.ErrNotFound) {
-				status = http.StatusNotFound
-			}
-			writeError(w, status, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"data": item})
-	case http.MethodDelete:
-		if err := enforceStateChangingRequest(r); err != nil {
-			writeError(w, http.StatusForbidden, err)
-			return
-		}
-		if err := h.service.DeleteCategory(r.Context(), id); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"data": "ok"})
-	default:
-		methodNotAllowed(w)
-	}
-}
-
-func (h *HTTPHandler) handleAdminTags(w http.ResponseWriter, r *http.Request, _ uint) {
-	switch r.Method {
-	case http.MethodGet:
-		items, err := h.service.ListTags(r.Context())
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"data": items})
-	case http.MethodPost:
-		if err := enforceStateChangingRequest(r); err != nil {
-			writeError(w, http.StatusForbidden, err)
-			return
-		}
-		var payload service.TagInput
-		if err := decodeJSON(w, r, &payload); err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		item, err := h.service.CreateTag(r.Context(), payload)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		writeJSON(w, http.StatusCreated, map[string]any{"data": item})
-	default:
-		methodNotAllowed(w)
-	}
-}
-
-func (h *HTTPHandler) handleAdminTagItem(w http.ResponseWriter, r *http.Request, _ uint) {
-	id, err := parseUintPath(r.URL.Path, "/api/admin/tags/")
-	if err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
-	}
-	switch r.Method {
-	case http.MethodPut:
-		if err := enforceStateChangingRequest(r); err != nil {
-			writeError(w, http.StatusForbidden, err)
-			return
-		}
-		var payload service.TagInput
-		if err := decodeJSON(w, r, &payload); err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		item, err := h.service.UpdateTag(r.Context(), id, payload)
-		if err != nil {
-			status := http.StatusBadRequest
-			if errors.Is(err, service.ErrNotFound) {
-				status = http.StatusNotFound
-			}
-			writeError(w, status, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"data": item})
-	case http.MethodDelete:
-		if err := enforceStateChangingRequest(r); err != nil {
-			writeError(w, http.StatusForbidden, err)
-			return
-		}
-		if err := h.service.DeleteTag(r.Context(), id); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"data": "ok"})
-	default:
-		methodNotAllowed(w)
-	}
-}
-
-func (h *HTTPHandler) handleAdminSite(w http.ResponseWriter, r *http.Request, _ uint) {
-	switch r.Method {
-	case http.MethodGet:
-		site, err := h.service.GetSiteSetting(r.Context())
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"data": site})
-	case http.MethodPut:
-		if err := enforceStateChangingRequest(r); err != nil {
-			writeError(w, http.StatusForbidden, err)
-			return
-		}
-		var payload service.SiteSettingInput
-		if err := decodeJSON(w, r, &payload); err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		site, err := h.service.UpdateSiteSetting(r.Context(), payload)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"data": site})
-	default:
-		methodNotAllowed(w)
-	}
-}
-
-func (h *HTTPHandler) handleAdminUpload(w http.ResponseWriter, r *http.Request, _ uint) {
-	if r.Method != http.MethodPost {
-		methodNotAllowed(w)
-		return
-	}
-	if err := enforceStateChangingRequest(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
-		return
-	}
-
-	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBodySize+(1<<20))
-	if err := r.ParseMultipartForm(maxUploadBodySize); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	if r.MultipartForm != nil {
-		defer r.MultipartForm.RemoveAll()
-	}
-
-	file, header, err := r.FormFile("file")
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	path, err := h.service.SaveUpload(file, header)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, map[string]any{"data": map[string]string{"path": path}})
 }
 
 func (h *HTTPHandler) handleAdminImportMarkdown(w http.ResponseWriter, r *http.Request, _ uint) {
@@ -714,10 +470,13 @@ func (h *HTTPHandler) handleAdminImportMarkdown(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBodySize)
 	if err := r.ParseMultipartForm(5 << 20); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
 	}
 
 	file, header, err := r.FormFile("file")
@@ -751,7 +510,7 @@ func (h *HTTPHandler) handleAdminImportMarkdown(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusCreated, map[string]any{"data": mapPost(post, true)})
 }
 
-func (h *HTTPHandler) handleUserRegister(w http.ResponseWriter, r *http.Request) {
+func (h *HTTPHandler) handleAdminPreview(w http.ResponseWriter, r *http.Request, _ uint) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return
@@ -760,39 +519,275 @@ func (h *HTTPHandler) handleUserRegister(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusForbidden, err)
 		return
 	}
-	if !h.authLimiter.Allow(h.rateLimitKey(r, "user-register"), 5, 15*time.Minute) {
-		writeError(w, http.StatusTooManyRequests, errors.New("too many registration attempts, please try again later"))
-		return
-	}
 
-	var payload service.UserRegisterInput
-	if err := decodeJSON(w, r, &payload, maxJSONBodyBytes); err != nil {
+	var payload struct {
+		MarkdownContent string `json:"markdown_content"`
+	}
+	if err := decodeJSON(w, r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 
-	user, err := h.service.RegisterUser(r.Context(), payload)
-	if err != nil {
-		status := http.StatusBadRequest
-		if errors.Is(err, service.ErrConflict) {
-			status = http.StatusConflict
-		}
-		writeError(w, status, err)
-		return
-	}
-
-	session, _ := h.sessions.Get(r, userSessionName)
-	session.Values = map[interface{}]interface{}{}
-	session.Values["user_id"] = int(user.ID)
-	if err := session.Save(r, w); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, map[string]any{"data": mapUser(user)})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": map[string]string{
+			"html_content": h.service.RenderPreview(payload.MarkdownContent),
+		},
+	})
 }
 
-func (h *HTTPHandler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
+func (h *HTTPHandler) handleAdminPostItem(w http.ResponseWriter, r *http.Request, _ uint) {
+	id, err := parseUintPath(r.URL.Path, "/api/admin/posts/")
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		post, err := h.service.GetAdminPost(r.Context(), id)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, service.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": mapPost(post, true)})
+	case http.MethodPut:
+		if err := enforceStateChangingRequest(r); err != nil {
+			writeError(w, http.StatusForbidden, err)
+			return
+		}
+
+		var payload service.PostInput
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		post, err := h.service.UpdatePost(r.Context(), id, payload)
+		if err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, service.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{"data": mapPost(post, true)})
+	case http.MethodDelete:
+		if err := enforceStateChangingRequest(r); err != nil {
+			writeError(w, http.StatusForbidden, err)
+			return
+		}
+
+		if err := h.service.DeletePost(r.Context(), id); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{"data": "ok"})
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func (h *HTTPHandler) handleAdminCategories(w http.ResponseWriter, r *http.Request, _ uint) {
+	switch r.Method {
+	case http.MethodGet:
+		items, err := h.service.ListCategories(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": items})
+	case http.MethodPost:
+		if err := enforceStateChangingRequest(r); err != nil {
+			writeError(w, http.StatusForbidden, err)
+			return
+		}
+
+		var payload service.CategoryInput
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		item, err := h.service.CreateCategory(r.Context(), payload)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"data": item})
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func (h *HTTPHandler) handleAdminCategoryItem(w http.ResponseWriter, r *http.Request, _ uint) {
+	id, err := parseUintPath(r.URL.Path, "/api/admin/categories/")
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodPut:
+		if err := enforceStateChangingRequest(r); err != nil {
+			writeError(w, http.StatusForbidden, err)
+			return
+		}
+
+		var payload service.CategoryInput
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		item, err := h.service.UpdateCategory(r.Context(), id, payload)
+		if err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, service.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{"data": item})
+	case http.MethodDelete:
+		if err := enforceStateChangingRequest(r); err != nil {
+			writeError(w, http.StatusForbidden, err)
+			return
+		}
+
+		if err := h.service.DeleteCategory(r.Context(), id); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{"data": "ok"})
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func (h *HTTPHandler) handleAdminTags(w http.ResponseWriter, r *http.Request, _ uint) {
+	switch r.Method {
+	case http.MethodGet:
+		items, err := h.service.ListTags(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": items})
+	case http.MethodPost:
+		if err := enforceStateChangingRequest(r); err != nil {
+			writeError(w, http.StatusForbidden, err)
+			return
+		}
+
+		var payload service.TagInput
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		item, err := h.service.CreateTag(r.Context(), payload)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, map[string]any{"data": item})
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func (h *HTTPHandler) handleAdminTagItem(w http.ResponseWriter, r *http.Request, _ uint) {
+	id, err := parseUintPath(r.URL.Path, "/api/admin/tags/")
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodPut:
+		if err := enforceStateChangingRequest(r); err != nil {
+			writeError(w, http.StatusForbidden, err)
+			return
+		}
+
+		var payload service.TagInput
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		item, err := h.service.UpdateTag(r.Context(), id, payload)
+		if err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, service.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{"data": item})
+	case http.MethodDelete:
+		if err := enforceStateChangingRequest(r); err != nil {
+			writeError(w, http.StatusForbidden, err)
+			return
+		}
+
+		if err := h.service.DeleteTag(r.Context(), id); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{"data": "ok"})
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func (h *HTTPHandler) handleAdminSite(w http.ResponseWriter, r *http.Request, _ uint) {
+	switch r.Method {
+	case http.MethodGet:
+		site, err := h.service.GetSiteSetting(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": site})
+	case http.MethodPut:
+		if err := enforceStateChangingRequest(r); err != nil {
+			writeError(w, http.StatusForbidden, err)
+			return
+		}
+
+		var payload service.SiteSettingInput
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		site, err := h.service.UpdateSiteSetting(r.Context(), payload)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": site})
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func (h *HTTPHandler) handleAdminUpload(w http.ResponseWriter, r *http.Request, _ uint) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return
@@ -802,72 +797,28 @@ func (h *HTTPHandler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var payload service.UserLoginInput
-	if err := decodeJSON(w, r, &payload, maxJSONBodyBytes); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBodySize)
+	if err := r.ParseMultipartForm(maxUploadBodySize); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if !h.authLimiter.Allow(h.rateLimitKey(r, "user-login:"+strings.ToLower(strings.TrimSpace(payload.Identifier))), 10, 15*time.Minute) {
-		writeError(w, http.StatusTooManyRequests, errors.New("too many login attempts, please try again later"))
-		return
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
 	}
 
-	user, err := h.service.AuthenticateUser(r.Context(), payload.Identifier, payload.Password)
+	file, header, err := r.FormFile("file")
 	if err != nil {
-		status := http.StatusUnauthorized
-		if !errors.Is(err, service.ErrUnauthorized) {
-			status = http.StatusInternalServerError
-		}
-		writeError(w, status, err)
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 
-	session, _ := h.sessions.Get(r, userSessionName)
-	session.Values = map[interface{}]interface{}{}
-	session.Values["user_id"] = int(user.ID)
-	if err := session.Save(r, w); err != nil {
+	path, err := h.service.SaveUpload(file, header)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"data": mapUser(user)})
-}
-
-func (h *HTTPHandler) handleUserLogout(w http.ResponseWriter, r *http.Request, _ uint) {
-	if r.Method != http.MethodPost {
-		methodNotAllowed(w)
-		return
-	}
-	if err := enforceStateChangingRequest(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
-		return
-	}
-
-	session, _ := h.sessions.Get(r, userSessionName)
-	session.Options.MaxAge = -1
-	if err := session.Save(r, w); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"data": "ok"})
-}
-
-func (h *HTTPHandler) handleUserMe(w http.ResponseWriter, r *http.Request, userID uint) {
-	if r.Method != http.MethodGet {
-		methodNotAllowed(w)
-		return
-	}
-	user, err := h.service.CurrentUser(r.Context(), userID)
-	if err != nil {
-		status := http.StatusInternalServerError
-		if errors.Is(err, service.ErrNotFound) {
-			status = http.StatusNotFound
-		}
-		writeError(w, status, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": mapUser(user)})
+	writeJSON(w, http.StatusCreated, map[string]any{"data": map[string]string{"path": path}})
 }
 
 func (h *HTTPHandler) handleSitemap(w http.ResponseWriter, r *http.Request) {
@@ -969,7 +920,7 @@ func (h *HTTPHandler) requireUser(next func(http.ResponseWriter, *http.Request, 
 func decodeJSON(w http.ResponseWriter, r *http.Request, dest any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, jsonBodyLimit)
 	defer r.Body.Close()
-	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dest); err != nil {
@@ -998,8 +949,7 @@ func methodNotAllowed(w http.ResponseWriter) {
 }
 
 func parseUintPath(path, prefix string) (uint, error) {
-	value := strings.TrimPrefix(path, prefix)
-	value = strings.Trim(value, "/")
+	value := strings.Trim(strings.TrimPrefix(path, prefix), "/")
 	id, err := strconv.ParseUint(value, 10, 64)
 	if err != nil {
 		return 0, service.ErrNotFound
@@ -1095,11 +1045,7 @@ func baseURL(r *http.Request) string {
 
 func (h *HTTPHandler) cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
-
-		if value := origin(r); value != "" {
+		if value := h.origin(r); value != "" {
 			w.Header().Set("Access-Control-Allow-Origin", value)
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 		}
@@ -1113,7 +1059,7 @@ func (h *HTTPHandler) cors(next http.Handler) http.Handler {
 	})
 }
 
-func origin(r *http.Request) string {
+func (h *HTTPHandler) origin(r *http.Request) string {
 	value := strings.TrimSpace(r.Header.Get("Origin"))
 	if value == "" {
 		return ""
@@ -1123,13 +1069,18 @@ func origin(r *http.Request) string {
 	if err != nil {
 		return ""
 	}
+
 	if strings.EqualFold(u.Host, r.Host) {
 		return value
 	}
 	if u.Host == "localhost:5173" || u.Host == "127.0.0.1:5173" {
 		return value
 	}
-
+	for _, allowed := range h.cfg.App.AllowedOrigins {
+		if strings.EqualFold(strings.TrimSpace(allowed), value) {
+			return value
+		}
+	}
 	return ""
 }
 

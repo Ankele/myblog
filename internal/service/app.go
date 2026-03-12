@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 
@@ -129,6 +128,9 @@ func (s *AppService) RegisterUser(ctx context.Context, input UserRegisterInput) 
 	}
 	if len(username) < 3 || len(username) > 64 {
 		return nil, errors.New("username length must be between 3 and 64")
+	}
+	if !usernamePattern.MatchString(strings.ToLower(username)) {
+		return nil, errors.New("username must start with a letter or number and can contain letters, numbers, dot, underscore, and hyphen")
 	}
 	if !validEmail(email) {
 		return nil, errors.New("email is invalid")
