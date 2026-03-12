@@ -1,13 +1,17 @@
 <script setup>
 import { onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 
-import { deletePost, fetchAdminPosts } from '../api/admin'
+import { deletePost, fetchAdminPosts, importMarkdownPost } from '../api/admin'
 import EmptyState from '../components/EmptyState.vue'
 
+const router = useRouter()
 const loading = ref(true)
+const importing = ref(false)
 const posts = ref([])
 const filter = ref('')
 const errorMessage = ref('')
+const successMessage = ref('')
 
 async function loadPosts() {
   loading.value = true
@@ -30,6 +34,27 @@ async function removePost(id) {
   await loadPosts()
 }
 
+async function onImportMarkdown(event) {
+  const [file] = event.target.files || []
+  if (!file) {
+    return
+  }
+
+  importing.value = true
+  errorMessage.value = ''
+  successMessage.value = ''
+  try {
+    const response = await importMarkdownPost(file, { status: 'draft' })
+    successMessage.value = 'Markdown 已导入，正在进入编辑页。'
+    await router.push(`/admin/posts/${response.data.id}`)
+  } catch (error) {
+    errorMessage.value = error.message
+  } finally {
+    importing.value = false
+    event.target.value = ''
+  }
+}
+
 onMounted(loadPosts)
 </script>
 
@@ -46,16 +71,21 @@ onMounted(loadPosts)
           <option value="draft">草稿</option>
           <option value="published">已发布</option>
         </select>
+        <label class="button secondary upload-button">
+          {{ importing ? '导入中...' : '导入 Markdown' }}
+          <input type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" :disabled="importing" @change="onImportMarkdown" />
+        </label>
         <router-link class="button" to="/admin/posts/new">新建文章</router-link>
       </div>
     </div>
 
     <p v-if="errorMessage" class="error-text">{{ errorMessage }}</p>
+    <p v-if="successMessage" class="success-text">{{ successMessage }}</p>
 
     <EmptyState
       v-if="!loading && posts.length === 0"
       title="还没有文章"
-      description="先创建一篇草稿，再逐步补充内容和封面。"
+      description="先创建一篇草稿，再逐步补充内容和封面，或直接导入 Markdown 文件。"
     />
 
     <section v-else class="card table-card">
@@ -125,6 +155,23 @@ onMounted(loadPosts)
 .error-text {
   margin: 0;
   color: var(--danger);
+}
+
+.success-text {
+  margin: 0;
+  color: var(--success);
+}
+
+.upload-button {
+  position: relative;
+  overflow: hidden;
+}
+
+.upload-button input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
 }
 
 @media (max-width: 860px) {

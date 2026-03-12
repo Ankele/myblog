@@ -6,6 +6,7 @@ import {
   fetchAdminCategories,
   fetchAdminPost,
   fetchAdminTags,
+  importMarkdownPost,
   previewMarkdown,
   savePost,
   uploadFile,
@@ -129,6 +130,32 @@ async function onInsertImage(event) {
   await renderPreview()
 }
 
+async function onImportMarkdown(event) {
+  const [file] = event.target.files || []
+  if (!file) {
+    return
+  }
+
+  saving.value = true
+  errorMessage.value = ''
+  successMessage.value = ''
+  try {
+    const response = await importMarkdownPost(file, {
+      status: form.status,
+      category_id: form.category_id,
+      tag_ids: form.tag_ids,
+      cover_image: form.cover_image,
+    })
+    successMessage.value = 'Markdown 已导入为文章，正在进入编辑页。'
+    await router.replace(`/admin/posts/${response.data.id}`)
+  } catch (error) {
+    errorMessage.value = error.message
+  } finally {
+    saving.value = false
+    event.target.value = ''
+  }
+}
+
 onMounted(async () => {
   await loadReferenceData()
   await loadPost()
@@ -143,6 +170,10 @@ onMounted(async () => {
         <h1 class="serif">{{ isEdit ? '编辑文章' : '新建文章' }}</h1>
       </div>
       <div class="toolbar-actions">
+        <label class="button ghost upload-button">
+          导入 Markdown
+          <input type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" @change="onImportMarkdown" />
+        </label>
         <button class="button secondary" type="button" @click="renderPreview">刷新预览</button>
         <button class="button" :disabled="saving || loading" type="button" @click="onSave">
           {{ saving ? '保存中...' : '保存文章' }}

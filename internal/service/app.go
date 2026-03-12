@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 
@@ -490,6 +491,7 @@ func (s *AppService) uniqueSlug(ctx context.Context, model any, requested, fallb
 }
 
 var nonSlugPattern = regexp.MustCompile(`[^a-z0-9]+`)
+var usernamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{2,31}$`)
 
 func slugify(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))

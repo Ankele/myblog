@@ -22,7 +22,9 @@ redis:
 
 app:
   session_secret: your-session-secret-key
+  session_cookie_secure: false
   default_admin_username: admin
   default_admin_password: admin123456
   upload_dir: ./uploads
   frontend_dist: ./web/dist
+  allowed_origins: []
